@@ -18,6 +18,7 @@ if sys.executable != _python and os.path.exists(_python):
     os.execv(_python, [_python] + sys.argv)
 # ────────────────────────────────────────────────
 
+import argparse
 import os
 import sys
 import json
@@ -502,38 +503,97 @@ def step_transfer_and_extract(
 
 # ──────────── 主入口（状态机） ────────────
 
+def _parse_args() -> argparse.Namespace:
+    """解析命令行参数。提供了的参数会跳过对应的交互步骤。"""
+    parser = argparse.ArgumentParser(
+        prog="deploy_mod",
+        description="Steam Deck Mod 部署工具。提供参数则跳过对应交互步骤。",
+    )
+    parser.add_argument("-p", "--profile", help="已保存的配置名称（跳过配置选择）")
+    parser.add_argument("-u", "--user", help="SSH 用户名（跳过连接输入）")
+    parser.add_argument("-H", "--host", help="SSH 主机地址（跳过连接输入）")
+    parser.add_argument("-P", "--port", type=int, default=22, help="SSH 端口（默认 22）")
+    parser.add_argument("-W", "--password", help="SSH 密码（跳过密码输入）")
+    parser.add_argument("-g", "--game", help="游戏目录名（跳过游戏选择）")
+    parser.add_argument("-m", "--mod-dir", help="完整 mod 目录路径（跳过 mod 目录检测）")
+    parser.add_argument("-z", "--zip", help="本地 mod zip 路径（跳过文件选择）")
+    parser.add_argument("--steam-dir", help="Steam 游戏根目录（覆盖配置）")
+    return parser.parse_args()
+
+
 def main():
     print()
     print(f"  {Style.BOLD}╔{'═' * 46}╗{Style.NC}")
     print(f"  {Style.BOLD}║   Steam Deck Mod 部署工具 {Style.NC}")
     print(f"  {Style.BOLD}╚{'═' * 46}╝{Style.NC}")
 
+    args = _parse_args()
+
+    # ── 提前解析 CLI 参数 → 决定哪些状态可以跳过 ──
+    profile_name = args.profile
+    cli_user      = args.user
+    cli_host      = args.host
+    cli_port      = args.port
+    cli_password  = args.password
+    cli_game      = args.game
+    cli_mod_dir   = args.mod_dir
+    cli_zip       = args.zip
+    cli_steam_dir = args.steam_dir
+
     # 状态变量
     profile  = None
-    user     = ""
-    host     = ""
-    port     = 22
-    password = ""
+    user     = cli_user or ""
+    host     = cli_host or ""
+    port     = cli_port
+    password = cli_password or ""
     steam_dir = ""
     game_dir  = ""
-    full_mod_dir = ""
-    local_zip = ""
+    full_mod_dir = cli_mod_dir or ""
+    local_zip = cli_zip or ""
 
     try:
         # ── 状态机 ──
+        # 跳过标记：若 CLI 已提供参数则该状态直接跳过
+        skip_state1 = bool(cli_user and cli_host)
+        skip_state2 = bool(cli_game and cli_steam_dir or cli_game)
+        skip_state3 = bool(cli_mod_dir)
+        skip_state4 = bool(cli_zip)
+
         state = 0  # 0=配置管理, 1=连接, 2=选游戏, 3=mod目录, 4=选文件, 5=传输解压
         while True:
             if state == 0:
-                profile = manage_profiles()
+                # 优先用 CLI 的 --profile；否则进入配置选择
+                if profile_name:
+                    profiles = _load_profiles()
+                    found = next((p for p in profiles if p['name'] == profile_name), None)
+                    if not found:
+                        error(f"未找到配置「{profile_name}」")
+                        sys.exit(1)
+                    profile = found
+                else:
+                    profile = manage_profiles()
                 user  = profile.get('user', 'deck')
                 host  = profile.get('host', '')
                 port  = profile.get('port', 22)
                 password = profile.get('password', '')
                 steam_dir = profile.get('steam_dir', '')
+                # CLI 参数覆盖配置
+                if cli_user: user = cli_user
+                if cli_host: host = cli_host
+                if cli_port != 22: port = cli_port
+                if cli_password: password = cli_password
+                if cli_steam_dir: steam_dir = cli_steam_dir
                 info(f"已选用: {Style.BOLD}{profile['name']}{Style.NC}  ({user}@{host}:{port})")
                 state = 1
 
             elif state == 1:
+                if skip_state1:
+                    info(f"CLI 参数已提供连接信息，跳过连接验证: {user}@{host}:{port}")
+                    if not host:
+                        error("--host 是必需的")
+                        sys.exit(1)
+                    state = 2
+                    continue
                 header("1. 连接远程主机")
                 r = step_connect(user, host, port, password)
                 if r is BACK:
@@ -543,6 +603,13 @@ def main():
                 state = 2
 
             elif state == 2:
+                if skip_state2:
+                    if cli_game:
+                        selected = cli_game
+                        game_dir = f"{steam_dir}/{selected}"
+                        info(f"CLI 参数已指定游戏: {game_dir}")
+                    state = 3
+                    continue
                 header("2. 选择游戏")
                 r = step_choose_game(user, host, port, password, steam_dir)
                 if r is BACK:
@@ -552,6 +619,10 @@ def main():
                 state = 3
 
             elif state == 3:
+                if skip_state3:
+                    info(f"CLI 参数已指定 mod 目录: {full_mod_dir}")
+                    state = 4
+                    continue
                 header("3. 确定 Mod 目录")
                 r = step_determine_mod_dir(user, host, port, password, game_dir)
                 if r is BACK:
@@ -561,6 +632,13 @@ def main():
                 state = 4
 
             elif state == 4:
+                if skip_state4:
+                    if not os.path.isfile(local_zip):
+                        error(f"--zip 文件不存在: {local_zip}")
+                        sys.exit(1)
+                    info(f"CLI 参数已指定 zip 文件: {local_zip}")
+                    state = 5
+                    continue
                 header("4. 选择本地 Mod 文件")
                 r = step_local_zip()
                 if r is BACK:
