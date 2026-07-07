@@ -518,6 +518,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("-m", "--mod-dir", help="完整 mod 目录路径（跳过 mod 目录检测）")
     parser.add_argument("-z", "--zip", help="本地 mod zip 路径（跳过文件选择）")
     parser.add_argument("--steam-dir", help="Steam 游戏根目录（覆盖配置）")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="非交互模式：遇到任何缺失必填参数直接报错退出，不进入交互")
     return parser.parse_args()
 
 
@@ -528,6 +530,24 @@ def main():
     print(f"  {Style.BOLD}╚{'═' * 46}╝{Style.NC}")
 
     args = _parse_args()
+
+    # ── 非交互模式：检查所有必需参数，缺则直接报错退出 ──
+    missing = []
+    if args.yes:
+        # 至少要有一种连接来源：--profile，或 --host
+        if not args.profile and not args.host:
+            missing.append("--host 或 --profile（至少需要一种连接来源）")
+        if not args.game:
+            missing.append("--game")
+        if not args.mod_dir:
+            missing.append("--mod-dir")
+        if not args.zip:
+            missing.append("--zip")
+        if missing:
+            print(f"  {Style.RED}✗{Style.NC} 非交互模式需要以下参数：", file=sys.stderr)
+            for m in missing:
+                print(f"    - {m}", file=sys.stderr)
+            sys.exit(1)
 
     # ── 提前解析 CLI 参数 → 决定哪些状态可以跳过 ──
     profile_name = args.profile
@@ -571,6 +591,9 @@ def main():
                         sys.exit(1)
                     profile = found
                 else:
+                    if args.yes:
+                        error("非交互模式：--profile 缺失且未提供 --host")
+                        sys.exit(1)
                     profile = manage_profiles()
                 user  = profile.get('user', 'deck')
                 host  = profile.get('host', '')
@@ -589,11 +612,11 @@ def main():
             elif state == 1:
                 if skip_state1:
                     info(f"CLI 参数已提供连接信息，跳过连接验证: {user}@{host}:{port}")
-                    if not host:
-                        error("--host 是必需的")
-                        sys.exit(1)
                     state = 2
                     continue
+                if args.yes:
+                    error("非交互模式：--host 缺失（或配置不全）")
+                    sys.exit(1)
                 header("1. 连接远程主机")
                 r = step_connect(user, host, port, password)
                 if r is BACK:
@@ -610,6 +633,9 @@ def main():
                         info(f"CLI 参数已指定游戏: {game_dir}")
                     state = 3
                     continue
+                if args.yes:
+                    error("非交互模式：--game 缺失")
+                    sys.exit(1)
                 header("2. 选择游戏")
                 r = step_choose_game(user, host, port, password, steam_dir)
                 if r is BACK:
@@ -623,6 +649,9 @@ def main():
                     info(f"CLI 参数已指定 mod 目录: {full_mod_dir}")
                     state = 4
                     continue
+                if args.yes:
+                    error("非交互模式：--mod-dir 缺失")
+                    sys.exit(1)
                 header("3. 确定 Mod 目录")
                 r = step_determine_mod_dir(user, host, port, password, game_dir)
                 if r is BACK:
@@ -639,6 +668,9 @@ def main():
                     info(f"CLI 参数已指定 zip 文件: {local_zip}")
                     state = 5
                     continue
+                if args.yes:
+                    error("非交互模式：--zip 缺失")
+                    sys.exit(1)
                 header("4. 选择本地 Mod 文件")
                 r = step_local_zip()
                 if r is BACK:
